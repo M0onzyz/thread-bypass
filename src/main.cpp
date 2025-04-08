@@ -7,6 +7,8 @@
 
 using namespace wincpp;
 
+static constexpr auto thread_map = 0x286210;
+
 static void whitelist_thread(
     const std::unique_ptr< process_t >& process,
     std::shared_ptr< core::handle_t > handle,
@@ -63,7 +65,6 @@ std::int32_t main( )
 
         whitelist_thread( process, handle, thread_id, message_box_indirect.address( ) );
 
-
         // Resume the thread
         if ( ResumeThread( handle->native ) == static_cast< DWORD >( -1 ) )
             throw core::error::from_win32( GetLastError( ) );
@@ -106,7 +107,8 @@ void whitelist_thread(
     process->thread_factory.suspend_all( );
 
     memory::pointer_t< std::uintptr_t > root_entry = *map;
-    memory::pointer_t< std::uintptr_t > next_entry = *( root_entry + 0x08 );
+    const std::size_t map_size = *( map + 0x8 );
+    memory::pointer_t< std::uintptr_t > next_entry = *( root_entry + 0x8 );
 
     auto& result = root_entry;
 
@@ -136,18 +138,20 @@ void whitelist_thread(
 
     if ( ( result + 0x19 ).read< std::uint8_t >( 0 ) )
     {
-        const auto& map_entry_allocation = process->memory_factory.allocate( 0x38, memory::protection_flags_t::readwrite, false );
-        map_entry_allocation->write( 0x0, root_entry.address( ) );
-        map_entry_allocation->write( 0x8, next_entry.address( ) );
-        map_entry_allocation->write( 0x10, root_entry.address( ) );
-        map_entry_allocation->write( 0x18, 0 );
-        map_entry_allocation->write( 0x20, id );
-        map_entry_allocation->write( 0x28, creation_time_64 );
-        map_entry_allocation->write( 0x30, start_address );
+        std::array< std::uintptr_t, 7 > entry{ root_entry.address( ), next_entry.address( ), root_entry.address( ), 0, id,
+                                               creation_time_64,      start_address };
 
-        next_entry.write< std::uintptr_t >( 0x0, map_entry_allocation->address( ) );
-        next_entry.write< std::uintptr_t >( 0x8, map_entry_allocation->address( ) );
-        next_entry.write< std::uintptr_t >( 0x10, map_entry_allocation->address( ) );
+        const auto& map_entry_allocation = process->memory_factory.allocate( 0x38, memory::protection_flags_t::readwrite, false );
+        map_entry_allocation->write( 0x0, reinterpret_cast< const std::uint8_t* >( entry.data( ) ), entry.size( ) * sizeof( std::uintptr_t ) );
+
+        *( map + 0x8 ) = map_size + 1;
+
+        std::array< std::uintptr_t, 3 > next_entry_array{ map_entry_allocation->address( ),
+                                                          map_entry_allocation->address( ),
+                                                          map_entry_allocation->address( ) };
+
+        next_entry.write(
+            0x0, reinterpret_cast< const std::uint8_t* >( next_entry_array.data( ) ), next_entry_array.size( ) * sizeof( std::uintptr_t ) );
     }
 
     process->thread_factory.resume_all( );
