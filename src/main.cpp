@@ -48,6 +48,8 @@ std::int32_t main( )
 
         std::println( "[+] Allocated {} bytes at {:#x}", sizeof( MSGBOXPARAMSA ), params_allocation->address( ) );
 
+        process->thread_factory.suspend_all( );
+
         const auto handle = core::handle_t::create( CreateRemoteThreadEx(
             process->handle->native,
             nullptr,
@@ -65,9 +67,7 @@ std::int32_t main( )
 
         whitelist_thread( process, handle, thread_id, message_box_indirect.address( ) );
 
-        // Resume the thread
-        if ( ResumeThread( handle->native ) == static_cast< DWORD >( -1 ) )
-            throw core::error::from_win32( GetLastError( ) );
+        process->thread_factory.resume_all( );
 
         // Wait for the thread to finish
         WaitForSingleObject( handle->native, INFINITE );
@@ -94,7 +94,7 @@ void whitelist_thread(
     std::uintptr_t start_address )
 {
     const auto& hyperion = process->module_factory[ "RobloxPlayerBeta.dll" ];
-    const auto& map = process->memory_factory[ hyperion.address( ) + 0x286210 ];
+    const auto& map = process->memory_factory[ hyperion.address( ) + thread_map ];
 
     std::println( "[+] Map address: {:#x}", map.address( ) );
 
@@ -104,55 +104,27 @@ void whitelist_thread(
 
     const std::uint64_t creation_time_64 = ( static_cast< std::uint64_t >( creation_time.dwHighDateTime ) << 32 ) | creation_time.dwLowDateTime;
 
-    process->thread_factory.suspend_all( );
-
     memory::pointer_t< std::uintptr_t > root_entry = *map;
     const std::size_t map_size = *( map + 0x8 );
     memory::pointer_t< std::uintptr_t > next_entry = *( root_entry + 0x8 );
 
     auto& result = root_entry;
 
-    if ( ( next_entry + 0x19 ).read< std::uint8_t >( 0 ) == 0 )
-    {
-        do
-        {
-            const std::uintptr_t create_time = *( next_entry + 0x28 );
+    // This map is sorted by thread create time. Since we suspend the process before creating the thread, this thread will be the first one in the
+    // list, and we don't need to do any searching.
 
-            auto rbp = create_time < creation_time_64;
+    std::array< std::uintptr_t, 7 > entry{
+        root_entry.address( ), next_entry.address( ), root_entry.address( ), 0, id, creation_time_64, start_address
+    };
 
-            if ( create_time == creation_time_64 )
-                rbp = static_cast< std::uintptr_t >( *( next_entry + 0x20 ) ) < id;
+    const auto& map_entry_allocation = process->memory_factory.allocate( 0x38, memory::protection_flags_t::readwrite, false );
+    map_entry_allocation->write( 0x0, reinterpret_cast< const std::uint8_t* >( entry.data( ) ), entry.size( ) * sizeof( std::uintptr_t ) );
 
-            auto next_ptr = ( next_entry + 2 * 0x8 );
+    *( map + 0x8 ) = map_size + 1;
 
-            if ( !rbp )
-            {
-                result = next_entry;
-                next_ptr = next_entry;
-            }
+    std::array< std::uintptr_t, 3 > next_entry_array{ map_entry_allocation->address( ),
+                                                      map_entry_allocation->address( ),
+                                                      map_entry_allocation->address( ) };
 
-            next_entry = *next_ptr;
-
-        } while ( ( next_entry + 0x19 ).read< std::uint8_t >( 0 ) == 0 );
-    }
-
-    if ( ( result + 0x19 ).read< std::uint8_t >( 0 ) )
-    {
-        std::array< std::uintptr_t, 7 > entry{ root_entry.address( ), next_entry.address( ), root_entry.address( ), 0, id,
-                                               creation_time_64,      start_address };
-
-        const auto& map_entry_allocation = process->memory_factory.allocate( 0x38, memory::protection_flags_t::readwrite, false );
-        map_entry_allocation->write( 0x0, reinterpret_cast< const std::uint8_t* >( entry.data( ) ), entry.size( ) * sizeof( std::uintptr_t ) );
-
-        *( map + 0x8 ) = map_size + 1;
-
-        std::array< std::uintptr_t, 3 > next_entry_array{ map_entry_allocation->address( ),
-                                                          map_entry_allocation->address( ),
-                                                          map_entry_allocation->address( ) };
-
-        next_entry.write(
-            0x0, reinterpret_cast< const std::uint8_t* >( next_entry_array.data( ) ), next_entry_array.size( ) * sizeof( std::uintptr_t ) );
-    }
-
-    process->thread_factory.resume_all( );
+    next_entry.write( 0x0, reinterpret_cast< const std::uint8_t* >( next_entry_array.data( ) ), next_entry_array.size( ) * sizeof( std::uintptr_t ) );
 }
